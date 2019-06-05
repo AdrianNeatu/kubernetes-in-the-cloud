@@ -1,20 +1,134 @@
-provider "aws" {
-  region = "eu-central-1"
-}
+# main EKS terraform resource definition
+resource "aws_eks_cluster" "eks-cluster" {
+  name = "${var.cluster-name}"
 
-resource "aws_eks_cluster" "example" {
-  name     = "example"
-  role_arn = "arn:aws:iam::181999802870:role/EKS"
+  role_arn = "${aws_iam_role.demo-cluster.arn}"
 
   vpc_config {
-    subnet_ids = ["subnet-a3de92c8", "subnet-abe763d6"]
+    subnet_ids = [
+      "${module.eks-vpc.public_subnets}"]
   }
 }
 
-output "endpoint" {
-  value = "${aws_eks_cluster.example.endpoint}"
+# EKS Worker Nodes Resources
+resource "aws_security_group" "demo-node" {
+  name        = "terraform-eks-demo-node"
+  description = "Security group for all nodes in the cluster"
+
+  #  vpc_id      = "${aws_vpc.demo.id}"
+  vpc_id = "${module.eks-vpc.vpc_id}"
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = [
+      "0.0.0.0/0"]
+  }
+
+  tags = "${
+    map(
+     "Name", "terraform-eks-demo-node",
+     "kubernetes.io/cluster/${var.cluster-name}", "owned"
+    )
+  }"
 }
 
-output "kubeconfig-certificate-authority-data" {
-  value = "${aws_eks_cluster.example.certificate_authority.0.data}"
+resource "aws_security_group_rule" "demo-node-ingress-self" {
+  description              = "Allow node to communicate with each other"
+  from_port                = 0
+  protocol                 = "-1"
+  security_group_id        = "${aws_security_group.demo-node.id}"
+  source_security_group_id = "${aws_security_group.demo-node.id}"
+  to_port                  = 65535
+  type                     = "ingress"
+}
+
+resource "aws_security_group_rule" "demo-node-ingress-cluster" {
+  description              = "Allow worker Kubelets and pods to receive communication from the cluster control plane"
+  from_port                = 1025
+  protocol                 = "tcp"
+  security_group_id        = "${aws_security_group.demo-node.id}"
+  source_security_group_id = "${module.eks-vpc.default_security_group_id}"
+  to_port                  = 65535
+  type                     = "ingress"
+}
+
+data "aws_ami" "eks-worker" {
+  filter {
+    name   = "name"
+    values = [
+      "eks-worker-*"]
+  }
+
+  most_recent = true
+  owners      = [
+    "602401143452"]
+  # Amazon
+}
+
+# EKS currently documents this required userdata for EKS worker nodes to
+# properly configure Kubernetes applications on the EC2 instance.
+locals {
+  demo-node-userdata = --USERDATA
+#!/bin/bash -xe
+
+CA_CERTIFICATE_DIRECTORY =/etc/kubernetes/pki
+CA_CERTIFICATE_FILE_PATH = $CA_CERTIFICATE_DIRECTORY/ca.crt
+mkdir -p $CA_CERTIFICATE_DIRECTORY
+echo "${aws_eks_cluster.eks-cluster.certificate_authority.0.data}" | base64 -d >  $CA_CERTIFICATE_FILE_PATH
+INTERNAL_IP = $(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+sed -i s, MASTER_ENDPOINT, ${aws_eks_cluster.eks-cluster.endpoint}, g /var/lib/kubelet/kubeconfig
+sed -i s, CLUSTER_NAME, ${var.cluster-name}, g /var/lib/kubelet/kubeconfig
+sed -i s, REGION, ${var.eks-region}, g /etc/systemd/system/kubelet.service
+sed -i s, MAX_PODS, 20, g /etc/systemd/system/kubelet.service
+sed -i s, MASTER_ENDPOINT, ${aws_eks_cluster.eks-cluster.endpoint}, g /etc/systemd/system/kubelet.service
+sed -i s, INTERNAL_IP, $INTERNAL_IP,g /etc/systemd/system/kubelet.service
+DNS_CLUSTER_IP= 10.100.0.10
+if [[$INTERNAL_IP == 10.*]] ; then DNS_CLUSTER_IP = 172.20.0.10; fi
+sed -i s, DNS_CLUSTER_IP, $DNS_CLUSTER_IP, g /etc/systemd/system/kubelet.service
+sed -i s, CERTIFICATE_AUTHORITY_FILE,$CA_CERTIFICATE_FILE_PATH, g /var/lib/kubelet/kubeconfig
+sed -i s, CLIENT_CA_FILE, $CA_CERTIFICATE_FILE_PATH, g  /etc/systemd/system/kubelet.service
+systemctl daemon-reload
+systemctl restart kubelet
+USERDATA
+}
+
+resource "aws_launch_configuration" "demo" {
+  associate_public_ip_address = true
+  iam_instance_profile        = "${aws_iam_instance_profile.demo-node.name}"
+  image_id                    = "${data.aws_ami.eks-worker.id}"
+  instance_type               = "m4.large"
+  name_prefix                 = "terraform-eks-demo"
+  security_groups             = [
+    "${aws_security_group.demo-node.id}"]
+  user_data_base64            = "${base64encode(local.demo-node-userdata)}"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_autoscaling_group" "demo" {
+  desired_capacity     = 2
+  launch_configuration = "${aws_launch_configuration.demo.id}"
+  max_size             = 2
+  min_size             = 1
+  name                 = "terraform-eks-demo"
+
+  #  vpc_zone_identifier  = ["${aws_subnet.demo.*.id}"]
+  vpc_zone_identifier = [
+    "${module.eks-vpc.public_subnets}"]
+
+  tag {
+    key                 = "Name"
+    value               = "eks-worker-node"
+    propagate_at_launch = true
+  }
+
+  tag {
+    key                 = "kubernetes.io/cluster/${var.cluster-name}"
+    value               = "owned"
+    propagate_at_launch = true
+  }
 }
