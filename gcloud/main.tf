@@ -19,10 +19,10 @@ provider "google-beta" {
   region  = "${var.region}"
 }
 
-resource "google_container_node_pool" "omfe2-np" {
+resource "google_container_node_pool" "kitc-np" {
   project    = "${var.project-name}"
-  name       = "omfe2-node-pool"
-  cluster    = "${google_container_cluster.omfe2-cluster.name}"
+  name       = "kitc-node-pool"
+  cluster    = "${google_container_cluster.kitc-cluster.name}"
   region     = "${var.region}"
   node_count = 1
 
@@ -32,7 +32,7 @@ resource "google_container_node_pool" "omfe2-np" {
   }
 
   node_config {
-    machine_type    = "f1-micro"
+    machine_type    = "n1-standard-2"
     disk_type       = "pd-ssd"
     disk_size_gb    = 10
     oauth_scopes    = [
@@ -47,7 +47,7 @@ resource "google_container_node_pool" "omfe2-np" {
   }
 }
 
-resource "google_container_cluster" "omfe2-cluster" {
+resource "google_container_cluster" "kitc-cluster" {
   project                  = "${var.project-name}"
   name                     = "${var.cluster-name}"
   network                  = "gc-om-fe-lan"
@@ -60,15 +60,11 @@ resource "google_container_cluster" "omfe2-cluster" {
     "europe-west3-b",
   ]
 
-//  provisioner "local-exec" {
-//    working_dir = "kubernetes"
-//    command     = "yasha -v variables.yml -o deployment.yml deployment.yml.j2"
-//  }
-//  provisioner "local-exec" {
-//    working_dir = "kubernetes"
-//    command     = "yasha -v variables.yml -o ingress.yml ingress.yml.j2"
-//  }
-//  provisioner "local-exec" {
-//    command = "gcloud container clusters get-credentials --region=${var.region} ${google_container_cluster.omfe2-cluster.name}"
-//  }
+  provisioner "local-exec" {
+    command = "gcloud container clusters get-credentials --region=${var.region} ${google_container_cluster.kitc-cluster.name}"
+  }
+
+  provisioner "local-exec" {
+    command = "kubectl apply -f ./"
+  }
 }

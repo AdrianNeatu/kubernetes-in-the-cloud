@@ -1,0 +1,5 @@
+FROM nginx
+ADD ./nginx-application.conf /etc/nginx/nginx.conf
+ADD ./index.html /usr/share/nginx/html/
+RUN echo "daemon off;" >> /etc/nginx/nginx.conf
+CMD service nginx start
